@@ -1116,8 +1116,8 @@ contains
     dom%w = 0.0
 
     ! turbulence quantities (k-epsilon)
-    dom%tke = 1e-4
-    dom%td_eps = 1e-5
+    dom%tke = 1e-8
+    dom%td_eps = 1e-8
     dom%nut = 0.09 * dom%tke**2 / dom%td_eps
 
     deallocate (z_, u_, t_, c_)
@@ -1252,7 +1252,7 @@ contains
       mm = 0.5,    &  ! strength param of the expornent
       nn = 0.5,    &  ! strength param of the expornent
       dmix = 1e-3     ! vertical diffusivity of mixing zone, m2/s
-    logical :: use_kepsilon = .true.   ! impose(T) or expose(F) k-epsilon 
+    logical :: use_kepsilon = .false.   ! impose(T) or expose(F) k-epsilon 
 
     namelist /turbulence/ dmx0, dmz0, dhx0, dhz0, dcx0, dcz0, &
       ll, mm, nn, dmix, use_kepsilon
@@ -1297,7 +1297,8 @@ contains
 
     real :: dudx, dwdz, dudz, dwdx, d_delta_dz, Pr
     real :: adv_k, adv_e, diff_k, diff_e, buoy_k, buoy_e
-    real,  parameter :: nu=1.0e-6, sigma_k=1.0, sigma_e=1.3, ce1=1.44, ce2=1.92, ce3=0.0, c_mu=0.09
+    real,  parameter :: nu=1.0e-6, sigma_k=1.0D0, sigma_e=1.3D0, ce1=1.44D0, ce2=1.92D0, ce3=0.0D0, c_mu=0.09D0, FRAEDZ=0.14D0
+    real :: z_p, u_star, kappa=0.41, z0b=1.0e-4
 
     real, allocatable :: u(:,:), w(:,:)
 
@@ -1310,70 +1311,131 @@ contains
     tke=>dom%tke; td_eps=>dom%td_eps
     allocate (u(0:nx,nz), w(nx,0:nz))
     !----------------------------------------------------
-
-    dom%tke = 1.0e-8
-    dom%td_eps = 1.0e-8
     
     if (dom%use_kepsilon) then
-      ! k-epsilon model
-      do i = 1, nx
-        do k = dom%kc_bot(i), dom%k_srf-1
+      ! --- k-epsilon model ---
+      ! horizontal diffusivity
+      do i=1, nx
+        do k=1, nz
+
+          ! temperature, deg-C
           t_ = dom%t(i,k)
+
+          ! kinematic viscosity, m2/s
           nu_ = water_viscosity(t_)/water_density(t_)
+
+          ! thermal diffusivity, m2/s
           alpha_ = water_thermal_conductivity(t_)/(rho_water*c_water*4186)
+
+          ! concentration diffusivity, m2/s
           beta_ = nu_
 
+          ! eddy viscosity, m2/s
+          nut_ = (dom%dmx0/(3600*24))*dom%dx(i)**2
+
+          ! eddy thermal diffusivity, m2/s
+          alphat_ = (dom%dhx0/(3600*24))*dom%dx(i)**2
+
+          ! eddy concentraion diffusivity, m2/s
+          betat_ = nut_
+
+          ! effective viscosity, m2/s
+          dom%dmx(i,k) = nu_ + nut_
+
+          ! effective thermal diffusivity, m2/s
+          dom%dhx(i,k) = alpha_ + alphat_
+
+          ! effective concentration diffusivity, m2/s
+          dom%dcx(i,k) = beta_ + betat_
+
+        enddo
+      enddo
+
+      do i = 1, nx
+        do k = dom%kc_bot(i), dom%k_srf-1
           ! turbulence energy production rate (Pr)
-          dudx = (dom%u(i+1,k) - dom%u(i-1,k)) / (2.0 * dom%dxs(i))
-          dudz = (dom%u(i,k+1) - dom%u(i,k-1)) / (2.0 * dom%dzs(k))
-          dwdx = (dom%w(i+1,k) - dom%w(i-1,k)) / (2.0 * dom%dxs(i))
-          dwdz = (dom%w(i,k+1) - dom%w(i,k-1)) / (2.0 * dom%dzs(k))
+          dudx = (dom%u(i,k) - dom%u(i-1,k)) / (dom%dx(i))
+          dudz = (dom%u(i,k) - dom%u(i,k-1)) / (dom%dz(k))
+          dwdx = (dom%w(i,k) - dom%w(i-1,k)) / (dom%dx(i))
+          dwdz = (dom%w(i,k) - dom%w(i,k-1)) / (dom%dz(k))
           Pr = dom%nut(i,k)*2.0*(dudx**2 + dwdz**2 + 0.5*(dudz + dwdx)**2)
 
           ! buoyoncy turm (buoyoncy in k-fomula ) density gradienty for z
-          d_delta_dz = (dom%rho(i,k+1) - dom%rho(i,k-1))/rho_water/(2.0*dom%dzs(k))
+          d_delta_dz = (dom%rho(i,k) - dom%rho(i,k-1))/rho_water/(dom%dz(k))
           buoy_k = gravity / sigma_k * d_delta_dz
 
           ! buoyoncy turm (buoyoncy in ε-fomula)
-          if (tke(i,k) > 1.0e-8) then
+          if (dom%tke(i,k) > 1.25e-8) then
             buoy_e = ce3 * gravity / sigma_e * d_delta_dz * dom%td_eps(i,k) / dom%tke(i,k)
           else
             buoy_e = 0.0
           end if
 
           ! --- k-fomula ---
-          adv_k = - dom%u(i,k)*(dom%tke(i,k) - dom%tke(i-1,k))/dom%dxs(i)  &
-                  - dom%w(i,k)*(dom%tke(i,k) - dom%tke(i,k-1))/dom%dzs(k)
-          diff_k = (nu + dom%nut(i,k)/sigma_k) * ( &
-                    (dom%tke(i+1,k) - 2.0*dom%tke(i,k) + dom%tke(i-1,k)) / dom%dxs(i)**2 + &
-                    (dom%tke(i,k+1) - 2.0*dom%tke(i,k) + dom%tke(i,k-1)) / dom%dzs(k)**2 )
-          dom%tke(i,k) = dom%tke(i,k) + dt_sec*(adv_k + diff_k + Pr - buoy_k - dom%td_eps(i,k))
-          dom%tke(i,k) = max(dom%tke(i,k), 1.0e-9)
-          !print '(f12.10)', tke(i,k) 
+          if (dom%u(i,k) > 0.0) then
+            adv_k = - dom%u(i,k)*(dom%tke(i,k) - dom%tke(i-1,k))/dom%dx(i)
+          else
+            adv_k = - dom%w(i,k)*(dom%tke(i+1,k) - dom%tke(i,k))/dom%dx(i)
+          end if
+
+          if (dom%w(i,k) > 0.0) then
+            adv_k = adv_k - dom%w(i,k)*(dom%tke(i,k) - dom%tke(i,k-1))/dom%dz(i)
+          else
+            adv_k = adv_k - dom%w(i,k)*(dom%tke(i,k+1) - dom%tke(i,k))/dom%dz(i)
+          end if
+
+          diff_k = (dom%nut(i,k)/sigma_k) * ( &
+                    (dom%tke(i+1,k) - 2.0*dom%tke(i,k) + dom%tke(i-1,k)) / dom%dx(i)**2 + &
+                    (dom%tke(i,k+1) - 2.0*dom%tke(i,k) + dom%tke(i,k-1)) / dom%dz(k)**2 )
+          dom%tke(i,k) = dom%tke(i,k) + dt_sec*(adv_k + diff_k + Pr + buoy_k - dom%td_eps(i,k))
+          dom%tke(i,k) = max(dom%tke(i,k), 1.0e-9) 
 
           ! --- ε-fomula ---
-          adv_e = - dom%u(i,k)*(dom%td_eps(i,k) - dom%td_eps(i-1,k)) / dom%dxs(i)  &
-                  - dom%w(i,k)*(dom%td_eps(i,k) - dom%td_eps(i,k-1)) / dom%dzs(k)
-          diff_e = (nu + dom%nut(i,k)/sigma_e) * ( &
-                    (dom%td_eps(i+1,k) - 2.0*dom%td_eps(i,k) + dom%td_eps(i-1,k)) / dom%dxs(i)**2 + &
-                    (dom%td_eps(i,k+1) - 2.0*dom%td_eps(i,k) + dom%td_eps(i,k-1)) / dom%dzs(k)**2 )
-  
-          dom%td_eps(i,k) = dom%td_eps(i,k) + dt_sec*(adv_e + diff_e + ce1*Pr*dom%td_eps(i,k) / dom%tke(i,k)  &
-                  - ce2*dom%td_eps(i,k)**2 / dom%tke(i,k) + buoy_e)
+          if (dom%u(i,k) > 0.0) then
+            adv_e = - dom%u(i,k)*(dom%tke(i,k) - dom%tke(i-1,k))/dom%dx(i)
+          else
+            adv_e = - dom%w(i,k)*(dom%tke(i+1,k) - dom%tke(i,k))/dom%dx(i)
+          end if
+
+          if (dom%w(i,k) > 0.0) then
+            adv_e = adv_e - dom%w(i,k)*(dom%tke(i,k) - dom%tke(i,k-1))/dom%dz(i)
+          else
+            adv_e = adv_e - dom%w(i,k)*(dom%tke(i,k+1) - dom%tke(i,k))/dom%dz(i)
+          end if
+          diff_e = (dom%nut(i,k)/sigma_e) * ( &
+                    (dom%td_eps(i+1,k) - 2.0*dom%td_eps(i,k) + dom%td_eps(i-1,k)) / dom%dx(i)**2 + &
+                    (dom%td_eps(i,k+1) - 2.0*dom%td_eps(i,k) + dom%td_eps(i,k-1)) / dom%dz(k)**2 )
+          dom%td_eps(i,k) = dom%td_eps(i,k) + dt_sec*(adv_e + diff_e + ce1*Pr*dom%td_eps(i,k)/dom%tke(i,k)  &
+                  - ce2*dom%td_eps(i,k)**2/dom%tke(i,k) + buoy_e)
           dom%td_eps(i,k) = max(dom%td_eps(i,k), 1.0e-9)
-          !print '(f12.10)', td_eps(i,k) 
 
           ! --- nuw eddy viscousity ---
+          !if (k==kc_bot(i) .or. k == dom%k_srf-1) then
+          !  dom%tke(i,kc_bot(i)) = 1.0e-10
+          !endif
+
+          ! --- wall function at bottom ---
           if (k==kc_bot(i)) then
-            dom%tke(i,k) = 0
+            z_p = max(dom%zc(k) - z_bed(i), 1.0e-6)
+            u_star = kappa * abs(dom%u(i,k)) / log((z_p + z0b)/z0b)
+            dom%tke(i,k) = u_star**2 / sqrt(c_mu)
+            dom%td_eps(i,k) = u_star**3 / (kappa*z_p)
           endif
 
           dom%nut(i,k) = c_mu*dom%tke(i,k)**2/max(dom%td_eps(i,k), 1.0e-8)
 
+          print '(2i5, 3f15.10)',  i, k, dom%nut(i, k), dom%td_eps(i, k), dom%tke(i, k)
+
           ! --- new dmz, dhz, dcz ---
-          dom%dmz(i,k) = nu_ + dom%nut(i,k)
-          dom%dhz(i,k) = alpha_ + dom%nut(i,k)
-          dom%dcz(i,k) = beta_ + dom%nut(i,k)
+          dom%dmz(i,k) = dom%nut(i,k)
+          dom%dhz(i,k) = dom%nut(i,k)*FRAEDZ
+          dom%dcz(i,k) = dom%nut(i,k)*FRAEDZ
+
+
+          ! --- new dmz, dhz, dcz ---
+          !dom%dmz(i,k) = nu_ 
+          !dom%dhz(i,k) = alpha_ 
+          !dom%dcz(i,k) = beta_
         enddo
       enddo
 
@@ -1386,8 +1448,9 @@ contains
         dom%dhz(i,dom%k_srf) = dom%dhz(i,dom%k_srf-1)
         dom%dcz(i,dom%k_srf) = dom%dhz(i,dom%k_srf-1)
       enddo
-    else
-      ! --- setting from Richardson number ---
+
+     else
+      ! --- from Richardson number function ---
       ! horizontal diffusivity
       do i=1, nx
         do k=1, nz
@@ -1486,7 +1549,7 @@ contains
 
       enddo
     endif
-    
+
     deallocate (u, w)
 
   end subroutine update_turbulence
